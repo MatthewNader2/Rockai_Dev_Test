@@ -1,4 +1,6 @@
 require("dotenv").config();
+const crypto = require("crypto");
+const { translate } = require("@vitalets/google-translate-api");
 
 console.log(`--- SERVER SCRIPT STARTING AT ${new Date().toISOString()} ---`);
 console.log("Attempting to load environment variables and modules...");
@@ -12,9 +14,65 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" });
 
-let globalPatterns = null;
 let serverStatus = "analyzing";
 const insightsCache = new Map();
+
+let lastDataHash = null;
+const lastGeneratedTip = new Map();
+const generalTipsCache = new Map(); // Cache for the new general tips
+
+// This function generates general sales advice, NOT based on the leads data.
+const getOrGenerateGeneralTip = async (lang = "en") => {
+  const cacheKey = `general-tip-${lang}`;
+  // 80% chance to use the cached tip to avoid calling the AI too frequently for static content.
+  if (generalTipsCache.has(cacheKey) && Math.random() < 0.8) {
+    console.log(`CACHE HIT for general tip (lang: ${lang})`);
+    return generalTipsCache.get(cacheKey);
+  }
+  console.log(`CACHE MISS for general tip (lang: ${lang}). Calling AI...`);
+
+  const languageInstruction =
+    lang === "ar"
+      ? "الأهم: ردك بالكامل يجب أن يكون بلهجة مصرية راقية ومحترفة. استخدم الأبجدية العربية فقط. ممنوع تمامًا استخدام الحروف الإنجليزية (فرانكو آراب). يجب أن تكون النصيحة ملهمة وعامة وقابلة للتطبيق لأي مندوب مبيعات."
+      : "IMPORTANT: Your entire response must be in English. The tip must be inspiring, general, and applicable to any salesperson. It should be a single, concise sentence.";
+
+  const prompt = `
+    You are a world-class Sales Mentor like Zig Ziglar or Brian Tracy.
+    Your task is to provide ONE SINGLE piece of timeless, motivational sales advice. This advice should NOT be based on any specific data, but on universal principles of sales and human psychology.
+    ${languageInstruction}
+
+    ---
+    HERE ARE EXAMPLES OF THE EXACT STYLE I WANT:
+    - (Good): "Enthusiasm is the electricity of life. If you aren't enthusiastic, you'll be shocked at how dull your results are."
+    - (Good): "The best salespeople don't just sell a product; they sell a better version of the a future."
+    - (Good): "Stop selling. Start helping. The trust you build will close more deals than any tactic."
+    - (Bad - Too generic): "Work hard."
+    - (Bad - Too long): "To be a better salesperson, you need to understand your customer's needs, build a relationship, and then present your solution..."
+    ---
+
+    Now, provide a new, powerful, and concise piece of general sales wisdom.
+
+    Provide the output as a single, valid JSON object with ONLY these two keys:
+    1. "tip": A string containing the actionable advice.
+    2. "category": The string "Sales Wisdom".
+  `;
+
+  try {
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    let text = response.text();
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch && jsonMatch[0]) {
+      text = jsonMatch[0];
+    }
+    const generatedTip = JSON.parse(text);
+    generalTipsCache.set(cacheKey, generatedTip);
+    return generatedTip;
+  } catch (error) {
+    console.error(`❌ ERROR during General Tip Generation for ${lang}:`, error);
+    return { error: "Could not generate a general tip." };
+  }
+};
 
 const getOrGenerateGlobalPatterns = async (lang = "en") => {
   const cacheKey = `global-patterns-${lang}`;
@@ -26,7 +84,7 @@ const getOrGenerateGlobalPatterns = async (lang = "en") => {
 
   const languageInstruction =
     lang === "ar"
-      ? "IMPORTANT: Your entire response must be in a formal, high-class Egyptian Arabic dialect suitable for elite salespeople. All keys and values in the JSON must be in this Arabic. Use Direct Catching words, Your response should be Passive"
+      ? "مهم للغاية: يجب أن يكون ردك بالكامل باللغة العربية (لهجة مصرية راقية). استخدم الأبجدية العربية فقط. ممنوع تمامًا استخدام الحروف الإنجليزية (فرانكو آراب). جميع المفاتيح والقيم في JSON يجب أن تكون باللغة العربية."
       : "IMPORTANT: Your entire response must be in a sharp, motivational sales language. All keys and values in the JSON must be in English.";
 
   const prompt = `
@@ -74,13 +132,82 @@ const getOrGenerateGlobalPatterns = async (lang = "en") => {
   }
 };
 
-(async () => {
-  globalPatterns = await getOrGenerateGlobalPatterns("en");
-  if (!globalPatterns.error) {
-    console.log(
-      "✅ Initial English Global Strategic Analysis COMPLETE. Patterns are now in memory for context."
-    );
+const getOrGenerateProactiveTip = async (lang = "en") => {
+  const dataString = JSON.stringify(leadsData);
+  const currentDataHash = crypto
+    .createHash("sha256")
+    .update(dataString)
+    .digest("hex");
+
+  if (currentDataHash === lastDataHash && lastGeneratedTip.has(lang)) {
+    console.log(`CACHE HIT (Data Unchanged) for proactive tip (lang: ${lang})`);
+    return lastGeneratedTip.get(lang);
   }
+
+  console.log(
+    `CACHE MISS for proactive tip (lang: ${lang}). Data has changed or no cache exists. Calling AI...`
+  );
+
+  const languageInstruction =
+    lang === "ar"
+      ? "الأهم: ردك بالكامل يجب أن يكون بلهجة مصرية راقية ومحترفة. استخدم الأبجدية العربية فقط. ممنوع تمامًا استخدام الحروف الإنجليزية (فرانكو آراب). يجب أن تكون النصيحة مباشرة، بسيطة، وجذابة بأسلوب هادئ وغير مباشر."
+      : "IMPORTANT: Your entire response must be in English. The tip must be direct, simple, and catchy. Frame it in a passive, observational style, as if you're revealing a critical opportunity based on the data. It must be a single, concise sentence.";
+
+  const prompt = `
+    You are an elite Sales Coach. Your persona is calm, observant, and strategic.
+    Based on the CRM data below, provide ONE SINGLE, highly actionable tip.
+    ${languageInstruction}
+
+    ---
+    HERE ARE EXAMPLES OF THE EXACT STYLE I WANT:
+    - (Good): "A pattern suggests high-budget clients are most responsive in the morning. This is the prime time to connect."
+    - (Good): "'Facebook' leads are showing signs of going cold. A quick follow-up call is the key to reviving them."
+    - (Good): "The 'Villa' property is getting a lot of interest. It's the perfect offer for our undecided 'Hot' leads."
+    - (Bad - Too bossy): "You must call all the hot leads now!"
+    - (Bad - Too generic): "Following up with leads is a good idea."
+    ---
+
+    Now, find a new, specific, data-driven opportunity in the portfolio below and create a compelling tip in the same style.
+
+    Provide the output as a single, valid JSON object with ONLY these two keys:
+    1. "tip": A string containing the actionable advice.
+    2. "category": A short category for the tip (e.g., "Urgent Action", "Strategy", "Productivity").
+
+    ENTIRE LEADS PORTFOLIO:
+    ---
+    ${JSON.stringify(leadsData)}
+    ---
+  `;
+
+  try {
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    let text = response.text();
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch && jsonMatch[0]) {
+      text = jsonMatch[0];
+    }
+    const generatedTip = JSON.parse(text);
+
+    lastDataHash = currentDataHash;
+    lastGeneratedTip.set(lang, generatedTip);
+
+    return generatedTip;
+  } catch (error) {
+    console.error(
+      `❌ ERROR during Proactive Tip Generation for ${lang}:`,
+      error
+    );
+    return { error: "Could not generate a proactive tip." };
+  }
+};
+
+(async () => {
+  await getOrGenerateGlobalPatterns("en");
+  await getOrGenerateGlobalPatterns("ar");
+  console.log(
+    "✅ Initial Global Strategic Analysis COMPLETE for EN & AR. Server is ready."
+  );
   serverStatus = "ready";
 })();
 
@@ -99,6 +226,29 @@ app.use((req, res, next) => {
   next();
 });
 
+// --- Endpoints ---
+
+// ✨ UPDATED: This endpoint now serves one of two types of tips randomly.
+app.get("/api/ai-tip", async (req, res) => {
+  const lang = req.headers["accept-language"] || "en";
+  console.log(`---> SUCCESS: Matched the /api/ai-tip route. Language: ${lang}`);
+
+  let tip;
+  // 35% chance for general wisdom, 65% for a data-driven tip.
+  if (Math.random() < 0.35) {
+    console.log("   -> Choosing a GENERAL tip.");
+    tip = await getOrGenerateGeneralTip(lang);
+  } else {
+    console.log("   -> Choosing a DATA-DRIVEN tip.");
+    tip = await getOrGenerateProactiveTip(lang);
+  }
+
+  if (tip.error) {
+    res.status(500).json(tip);
+  } else {
+    res.json(tip);
+  }
+});
 
 app.get("/api/leads", (req, res) => {
   const lang = req.headers["accept-language"] || "en";
@@ -138,6 +288,21 @@ app.get("/api/performance/global-patterns", async (req, res) => {
     res.status(500).json(patterns);
   } else {
     res.json(patterns);
+  }
+});
+
+app.post("/api/translate", async (req, res) => {
+  const { text, targetLang } = req.body;
+  if (!text || !targetLang) {
+    return res.status(400).json({ error: "Missing text or targetLang" });
+  }
+  console.log(`---> REAL TRANSLATION: Translating to ${targetLang}`);
+  try {
+    const { text: translatedText } = await translate(text, { to: targetLang });
+    res.json({ translatedText });
+  } catch (error) {
+    console.error("Translation API Error:", error);
+    res.status(500).json({ translatedText: `[Translation Failed] ${text}` });
   }
 });
 
@@ -208,6 +373,8 @@ app.get("/api/performance/individual/:ownerId", async (req, res) => {
     return res.status(404).json({ message: "No leads found for this user." });
   }
 
+  const localizedGlobalPatterns = await getOrGenerateGlobalPatterns(lang);
+
   const stats = {
     totalLeads: userLeads.length,
     statusBreakdown: userLeads.reduce((acc, lead) => {
@@ -225,10 +392,9 @@ app.get("/api/performance/individual/:ownerId", async (req, res) => {
     }).length,
   };
 
-
   const languageInstruction =
     lang === "ar"
-      ? "IMPORTANT: Your entire response must be in a formal, high-class Egyptian Arabic dialect suitable for elite salespeople. All keys and values in the JSON must be in this Arabic. Use Direct Catching words, Your response should be Passive"
+      ? "مهم للغاية: يجب أن يكون ردك بالكامل باللغة العربية (لهجة مصرية راقية). استخدم الأبجدية العربية فقط. ممنوع تمامًا استخدام الحروف الإنجليزية (فرانكو آراب). جميع المفاتيح والقيم في JSON يجب أن تكون باللغة العربية."
       : "IMPORTANT: Your entire response must be in a sharp, motivational sales language. All keys and values in the JSON must be in English.";
 
   const prompt = `
@@ -244,7 +410,7 @@ app.get("/api/performance/individual/:ownerId", async (req, res) => {
     - "keywords": An array of important phrases from your analysis to be highlighted.
 
     Global Strategic Context (what the market is doing): ${JSON.stringify(
-      globalPatterns
+      localizedGlobalPatterns
     )}
 
     Salesperson's Performance Snapshot:
@@ -285,6 +451,8 @@ app.get("/api/performance/team", async (req, res) => {
   }
   console.log(`CACHE MISS for key: ${cacheKey}. Calling AI...`);
 
+  const localizedGlobalPatterns = await getOrGenerateGlobalPatterns(lang);
+
   const pipeline = leadsData.reduce((acc, lead) => {
     acc[lead.status] = (acc[lead.status] || 0) + 1;
     return acc;
@@ -296,10 +464,9 @@ app.get("/api/performance/team", async (req, res) => {
     return acc;
   }, {});
 
-
   const languageInstruction =
     lang === "ar"
-      ? "IMPORTANT: Your entire response must be in a formal, high-class Egyptian Arabic dialect suitable for elite salespeople. All keys and values in the JSON must be in this Arabic. Use Direct Catching words, Your response should be Passive"
+      ? "مهم للغاية: يجب أن يكون ردك بالكامل باللغة العربية (لهجة مصرية راقية). استخدم الأبجدية العربية فقط. ممنوع تمامًا استخدام الحروف الإنجليزية (فرانكو آراب). جميع المفاتيح والقيم في JSON يجب أن تكون باللغة العربية."
       : "IMPORTANT: Your entire response must be in a sharp, motivational sales language. All keys and values in the JSON must be in English.";
 
   const prompt = `
@@ -315,7 +482,7 @@ app.get("/api/performance/team", async (req, res) => {
     - "keywords": An array of important phrases from your analysis to be highlighted.
 
     Global Strategic Context (what the market is doing): ${JSON.stringify(
-      globalPatterns
+      localizedGlobalPatterns
     )}
 
     Team-wide Data:
@@ -372,6 +539,8 @@ app.post("/api/leads/:id/ai-summary", async (req, res) => {
     return res.status(404).json({ message: "Lead not found" });
   }
 
+  const localizedGlobalPatterns = await getOrGenerateGlobalPatterns(lang);
+
   const now = new Date();
   const formattedDateTime = now.toLocaleString("en-US", { timeZone: "UTC" });
   const leadInfo = `
@@ -388,10 +557,9 @@ app.post("/api/leads/:id/ai-summary", async (req, res) => {
     Description: ${lead.description || "None"}
   `;
 
-
   const languageInstruction =
     lang === "ar"
-      ? "IMPORTANT: Your entire response must be in a formal, high-class Egyptian Arabic dialect suitable for elite salespeople. All keys and values in the JSON must be in this Arabic. Use Direct Catching words, Your response should be Passive"
+      ? "مهم للغاية: يجب أن يكون ردك بالكامل باللغة العربية (لهجة مصرية راقية). استخدم الأبجدية العربية فقط. ممنوع تمامًا استخدام الحروف الإنجليزية (فرانكو آراب). جميع المفاتيح والقيم في JSON يجب أن تكون باللغة العربية."
       : "IMPORTANT: Your entire response must be in a sharp, motivational sales language. All keys and values in the JSON must be in English.";
 
   const prompt = `
@@ -408,7 +576,7 @@ app.post("/api/leads/:id/ai-summary", async (req, res) => {
     - "recommendedOffer": The specific property or deal structure to present.
 
     Global Strategic Context (what the market is doing): ${JSON.stringify(
-      globalPatterns
+      localizedGlobalPatterns
     )}
 
     Lead Data:
